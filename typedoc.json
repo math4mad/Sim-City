@@ -1,0 +1,12 @@
+{
+  "entryPoints": ["src/types.ts", "src/tools.ts", "src/assets.ts", "src/grid.ts", "src/save.ts", "src/traffic.ts", "src/city.ts", "src/main.ts"],
+  "out": "docs",
+  "name": "Mini Sim City — TypeScript API 文档",
+  "includeVersion": true,
+  "readme": "none",
+  "excludePrivate": true,
+  "tsconfig": "tsconfig.json",
+  "plugin": ["typedoc-plugin-mdn-links"],
+  "navigation": { "includeCategories": true },
+  "categoryOrder": ["类型契约", "工具目录", "资源加载", "占位网格", "存档系统", "巡航交通", "预置城市", "主入口"]
+}
