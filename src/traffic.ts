@@ -1,8 +1,8 @@
 /**
  * 巡航交通 — 沿固定环路行驶的车辆。
  *
- * 环路覆盖城市四条边道（世界坐标），车辆按里程匀速前进，
- * 车头自动朝向行进方向（90° 直角弯，符合低模风格）。
+ * 环路覆盖城市四条边道，拐角以四分之一圆弧过渡（半径 {@link CORNER_R}），
+ * 车辆沿弧线连续转弯，朝向逐帧平滑变化，不再是生硬的 90° 瞬切。
  * 车辆存放于独立 `traffic` 组：不参与占位网格、不写存档、
  * 推土机不可删除。
  *
@@ -15,22 +15,84 @@ import { make } from "./assets";
 import type { Mover, ToolDef } from "./types";
 import { GRID_SIZE } from "./types";
 
+/** 拐角圆弧半径（米）。车道中线距街缘约 2m，8m 半径接近真实路口转弯半径 */
+const CORNER_R = 8;
+
 /**
- * 环路四角（世界坐标，米）。
- * 西边道 x=-2（南北街的西侧车道中线），东 x=54，北 z=54，南 z=-2。
+ * 环路几何 — 由四个"车道中线上的拐角点"定义的圆角矩形。
+ *
+ * 采样为折线（直线段 + 圆弧弦段），并预计算每段的长度与
+ * 出段方向角，运行时按里程 O(段数) 定位。
  */
-const ROUTE: readonly Vector3[] = [
+interface RouteSeg {
+  /** 段起点（世界坐标） */
+  a: Vector3;
+  /** 段终点（世界坐标） */
+  b: Vector3;
+  /** 段长（米） */
+  len: number;
+  /** 段方向角（绕 Y 弧度，atan2(dx, dz)，模型正面 +Z） */
+  heading: number;
+}
+
+// 四个直角拐点（车道中线）
+const CORNERS: readonly Vector3[] = [
   new Vector3(-2, 0, -2),
-  new Vector3(-2, 0, GRID_SIZE * 13 + 2), // 54
+  new Vector3(-2, 0, GRID_SIZE * 13 + 2), // (−2, 54)
   new Vector3(54, 0, 54),
   new Vector3(54, 0, -2),
 ];
 
-/** 环路每段的长度（米），与 {@link ROUTE} 索引对应 */
-const SEG_LENS: readonly number[] = ROUTE.map((p, i) => p.distanceTo(ROUTE[(i + 1) % ROUTE.length]));
+/** 预计算圆角折线段表：每条边一条直线段 + 每个拐角一条弧（弦采样 N 段） */
+const SEGS: RouteSeg[] = (() => {
+  const segs: RouteSeg[] = [];
+  const push = (a: Vector3, b: Vector3) => {
+    segs.push({ a, b, len: a.distanceTo(b), heading: Math.atan2(b.x - a.x, b.z - a.z) });
+  };
+  const ARC_STEPS = 8; // 每个 90° 拐角弧的采样数 → 每步 11.25°，视觉平滑
+  const n = CORNERS.length;
+
+  // 每个拐角的入弯点 / 出弯点
+  const arcIn: Vector3[] = [];
+  const arcOut: Vector3[] = [];
+  for (let i = 0; i < n; i++) {
+    const cur = CORNERS[i];
+    const dirIn = cur.clone().sub(CORNERS[(i - 1 + n) % n]).normalize(); // 朝拐角方向
+    const dirOut = CORNERS[(i + 1) % n].clone().sub(cur).normalize(); // 离开拐角方向
+    arcIn.push(cur.clone().addScaledVector(dirIn, -CORNER_R)); // 沿入边回退 R
+    arcOut.push(cur.clone().addScaledVector(dirOut, CORNER_R)); // 沿出边前进 R
+  }
+
+  for (let i = 0; i < n; i++) {
+    // 1) 本边直线段：上个拐角的出弯点 → 本拐角的入弯点
+    push(arcOut[(i - 1 + n) % n], arcIn[i]);
+    // 2) 本拐角圆弧：arcIn[i] → arcOut[i]，四分之一圆，按角度插值弦采样
+    // 弧心几何：从入弯点沿"出边行进方向"偏移 R（验证：到两条路中线距离均为 R，
+    // 切点分别落在入边回退 R 处与出边前进 R 处，弧经拐角内侧过渡）
+    const a0 = arcIn[i];
+    const a1 = arcOut[i];
+    const dirOut = CORNERS[(i + 1) % n].clone().sub(CORNERS[i]).normalize();
+    const center = a0.clone().addScaledVector(dirOut, CORNER_R);
+    // 起止角（以弧心为原点，XZ 平面）
+    const ang0 = Math.atan2(a0.z - center.z, a0.x - center.x);
+    const ang1 = Math.atan2(a1.z - center.z, a1.x - center.x);
+    // 处理角度回绕，保证从 ang0 到 ang1 走 90°
+    let sweep = ang1 - ang0;
+    while (sweep > Math.PI) sweep -= 2 * Math.PI;
+    while (sweep < -Math.PI) sweep += 2 * Math.PI;
+    let prev = a0;
+    for (let s = 1; s <= ARC_STEPS; s++) {
+      const ang = ang0 + (sweep * s) / ARC_STEPS;
+      const p = new Vector3(center.x + CORNER_R * Math.cos(ang), 0, center.z + CORNER_R * Math.sin(ang));
+      push(prev, p);
+      prev = p;
+    }
+  }
+  return segs;
+})();
 
 /** 环路总周长（米），里程取模的模数 */
-export const ROUTE_LENGTH = SEG_LENS.reduce((a, b) => a + b, 0);
+export const ROUTE_LENGTH = SEGS.reduce((s, seg) => s + seg.len, 0);
 
 /** 全部巡航车辆 */
 const movers: Mover[] = [];
@@ -54,22 +116,27 @@ const modDist = (d: number): number => ((d % ROUTE_LENGTH) + ROUTE_LENGTH) % ROU
 /**
  * 里程 → 环路上的位置与朝向。
  *
+ * 路线为圆角折线（直线 + 弧弦段），车辆在弧段上逐帧改变朝向，
+ * 转弯视觉平滑。段方向角已在 {@link SEGS} 预计算，这里只做定位。
+ *
  * @param dist - 沿环路累计的里程（米，任意实数，内部取模周长）
  * @param out - 位置写入目标向量
  * @returns 该点的行进方向角（绕 Y 弧度）。模型正面为 +Z，
  *          `atan2(dx, dz)` 使车头对齐 `a→b` 方向。
  */
 function sampleAt(dist: number, out: Vector3): number {
-  dist = ((dist % ROUTE_LENGTH) + ROUTE_LENGTH) % ROUTE_LENGTH;
-  let i = 0;
-  while (dist > SEG_LENS[i]) {
-    dist -= SEG_LENS[i];
-    i = (i + 1) % ROUTE.length;
+  dist = modDist(dist);
+  for (const seg of SEGS) {
+    if (dist <= seg.len) {
+      out.lerpVectors(seg.a, seg.b, dist / seg.len);
+      return seg.heading;
+    }
+    dist -= seg.len;
   }
-  const a = ROUTE[i];
-  const b = ROUTE[(i + 1) % ROUTE.length];
-  out.lerpVectors(a, b, dist / SEG_LENS[i]);
-  return Math.atan2(b.x - a.x, b.z - a.z);
+  // 浮点余量：回退到最后一段终点
+  const last = SEGS[SEGS.length - 1];
+  out.copy(last.b);
+  return last.heading;
 }
 
 /**
@@ -86,6 +153,18 @@ export function addMover(tool: ToolDef, startDist: number, speed: number): boole
   trafficGroup.add(obj);
   movers.push({ obj, dist: startDist, speed });
   return true;
+}
+
+/**
+ * 沿环路每 2m 采样朝向角（度），供调试验证转弯平滑性。
+ */
+export function debugHeadings(): number[] {
+  const v = new Vector3();
+  const out: number[] = [];
+  for (let d = 0; d < ROUTE_LENGTH; d += 2) {
+    out.push(Math.round((sampleAt(d, v) * 180) / Math.PI));
+  }
+  return out;
 }
 
 /**

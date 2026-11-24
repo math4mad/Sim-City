@@ -29,7 +29,7 @@ import { claimAndPlace, buildDefaultCity } from "./city";
 import { cellsFree, claimCells, clearOccupancy, releaseCells } from "./grid";
 import { clearSave, readSave, saveCity, toolFromSave } from "./save";
 import { TOOLS } from "./tools";
-import { addMover, getMoverDists, ROUTE_LENGTH, trafficGroup, updateTraffic } from "./traffic";
+import { addMover, debugHeadings, getMoverDists, ROUTE_LENGTH, trafficGroup, updateTraffic } from "./traffic";
 import { GRID_SIZE } from "./types";
 
 import type { ToolDef, PlacedMeta } from "./types";
@@ -387,8 +387,9 @@ void (async () => {
   void addMover(TOOLS.find((t) => t.key === "bus")!, ROUTE_LENGTH * 0.5, 7);
   scene.add(trafficGroup);
 
-  // 调试句柄：供控制台/自动化测试读取真实车辆里程
+  // 调试句柄：供控制台/自动化测试读取真实车辆里程与路线朝向采样
   window.__trafficDists = getMoverDists;
+  window.__trafficHeadings = debugHeadings;
 
   setTool(TOOLS[1]);
 })();
@@ -401,6 +402,8 @@ declare global {
   interface Window {
     /** 调试：读取全部巡航车辆的环上里程（米） */
     __trafficDists: () => number[];
+    /** 调试：沿环路每 2m 采样朝向角（度） */
+    __trafficHeadings: () => number[];
   }
 }
 export type { ToolDef, PlacedMeta, SaveData, SaveItem } from "./types";
