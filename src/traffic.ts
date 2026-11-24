@@ -35,11 +35,21 @@ export const ROUTE_LENGTH = SEG_LENS.reduce((a, b) => a + b, 0);
 /** 全部巡航车辆 */
 const movers: Mover[] = [];
 
+/**
+ * 最小车距（米）。同环路 1D 里程间距防追尾：
+ * 后车与前车里程差小于此值时，后车本帧不动（排队跟随）。
+ * 车长 8–12m，取 14m 覆盖 bus（12m）+ 余量。
+ */
+const MIN_GAP = 14;
+
 /** 车辆所在的场景组（挂到 scene 上，位于 city 之外） */
 export const trafficGroup = new Group();
 
 /** 复用的临时向量，避免每帧分配 */
 const samplePos = new Vector3();
+
+/** 里程归一化到 [0, ROUTE_LENGTH) */
+const modDist = (d: number): number => ((d % ROUTE_LENGTH) + ROUTE_LENGTH) % ROUTE_LENGTH;
 
 /**
  * 里程 → 环路上的位置与朝向。
@@ -79,13 +89,43 @@ export function addMover(tool: ToolDef, startDist: number, speed: number): boole
 }
 
 /**
- * 每帧推进全部车辆。
+ * 当前全部车辆的环上里程（米，已归一化到 [0, ROUTE_LENGTH)）。
+ * 供调试/测试检查车距。
+ */
+export function getMoverDists(): number[] {
+  return movers.map((m) => ((m.dist % ROUTE_LENGTH) + ROUTE_LENGTH) % ROUTE_LENGTH).sort((a, b) => a - b);
+}
+
+/**
+ * 每帧推进全部车辆，带防追尾碰撞检测。
+ *
+ * 所有车辆沿同一环路同向行驶，碰撞问题即一维里程问题：
+ * 按里程排序后，每辆车检查与前车（环路上前方最近的一辆）的间距，
+ * 间距小于 {@link MIN_GAP} 时本帧保持不动，直到前车驶离。
+ * 效果：快车追上慢车后会排队跟随，而不是从车底钻过。
  *
  * @param delta - 帧间隔（秒），来自 `Timer.getDelta()`
  */
 export function updateTraffic(delta: number): void {
+  if (movers.length < 2) {
+    // 单车无需检测
+    for (const m of movers) m.dist += m.speed * delta;
+  } else {
+    // 按里程升序排列；行驶方向为里程增加方向，因此前车 = sorted[i+1]（末车的前车是首车，环路回绕）
+    const sorted = [...movers].sort((a, b) => modDist(a.dist) - modDist(b.dist));
+    for (let i = 0; i < sorted.length; i++) {
+      const m = sorted[i];
+      const ahead = sorted[(i + 1) % sorted.length];
+      let aheadDist = modDist(ahead.dist);
+      const myDist = modDist(m.dist);
+      if (aheadDist < myDist) aheadDist += ROUTE_LENGTH; // 回绕段：前车在环路边界另一侧
+      const gap = aheadDist - myDist;
+      // 间距充足才前进；否则原地等待（保持里程不变）
+      if (gap >= MIN_GAP) m.dist += m.speed * delta;
+    }
+  }
+
   for (const m of movers) {
-    m.dist += m.speed * delta;
     const rot = sampleAt(m.dist, samplePos);
     m.obj.position.copy(samplePos);
     m.obj.rotation.y = rot;
